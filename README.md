@@ -71,6 +71,24 @@ docker run --rm \
 Контейнер запускается от непривилегированного пользователя. Для production каталог `/app/data` должен быть постоянным, а порт 8000 — доступен через HTTPS с адресом из `PUBLIC_BASE_URL`.
 Если вместо именованного тома используется bind mount, каталог на хосте должен быть доступен на запись UID/GID `10001`.
 
+## Постоянный запуск в Railway
+
+В репозитории есть `railway.toml`: Railway собирает корневой `Dockerfile`, проверяет `/healthz` и перезапускает процесс после сбоя. Для надёжной работы настройте один экземпляр сервиса без sleep/scale-to-zero и подключите Volume с точкой монтирования `/app/data`.
+
+Минимальные переменные первого этапа:
+
+```text
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_ADMIN_IDS=...
+REELBOT_OPENAI_API_KEY=...
+DATA_DIR=/app/data
+DATABASE_PATH=/app/data/reelbot.sqlite3
+MEDIA_ROOT=/app/data/media
+HOST=0.0.0.0
+```
+
+`PORT` вручную не задавайте: Railway передаёт его автоматически. После **Generate Domain** задайте `PUBLIC_BASE_URL=https://${{RAILWAY_PUBLIC_DOMAIN}}`. Для Instagram позже добавьте `META_ACCESS_TOKEN` и `INSTAGRAM_USER_ID`. Используйте ровно одну replica: Telegram long polling и SQLite не рассчитаны на параллельный запуск нескольких экземпляров.
+
 ## Настройки
 
 Все параметры перечислены в `.env.example`. Обязательные для полного цикла:
