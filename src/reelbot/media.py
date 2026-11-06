@@ -29,21 +29,46 @@ class SubtitleSegment:
 
 
 CommandRunner = Callable[[Sequence[str]], object]
+DEFAULT_MEDIA_COMMAND_TIMEOUT_SECONDS = 900.0
 
 
-def _default_runner(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+def _default_runner(
+    command: Sequence[str],
+    *,
+    timeout_seconds: float = DEFAULT_MEDIA_COMMAND_TIMEOUT_SECONDS,
+) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             list(command),
             check=True,
             capture_output=True,
             text=True,
+            timeout=timeout_seconds,
         )
     except FileNotFoundError as exc:
         raise MediaProcessingError(f"Required executable is missing: {command[0]}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise MediaProcessingError(
+            f"Media command timed out after {timeout_seconds:g} seconds"
+        ) from exc
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or str(exc)).strip()
         raise MediaProcessingError(f"Media command failed: {detail}") from exc
+
+
+def _run_command(
+    runner: CommandRunner,
+    command: Sequence[str],
+    *,
+    timeout_seconds: float,
+) -> object:
+    """Apply the production timeout without breaking simple injected test runners."""
+
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be greater than zero")
+    if runner is _default_runner:
+        return _default_runner(command, timeout_seconds=timeout_seconds)
+    return runner(command)
 
 
 def _ensure_parent(path: Path) -> None:
@@ -67,6 +92,7 @@ def extract_audio(
     audio_path: str | Path,
     *,
     ffmpeg: str = "ffmpeg",
+    timeout_seconds: float = DEFAULT_MEDIA_COMMAND_TIMEOUT_SECONDS,
     runner: CommandRunner = _default_runner,
 ) -> Path:
     """Extract speech-friendly mono MP3 audio without changing the source video."""
@@ -74,7 +100,8 @@ def extract_audio(
     source = Path(video_path)
     destination = Path(audio_path)
     _ensure_parent(destination)
-    runner(
+    _run_command(
+        runner,
         [
             ffmpeg,
             "-hide_banner",
@@ -93,7 +120,8 @@ def extract_audio(
             "-b:a",
             "64k",
             str(destination),
-        ]
+        ],
+        timeout_seconds=timeout_seconds,
     )
     return destination
 
@@ -204,6 +232,7 @@ def burn_subtitles(
     ffmpeg: str = "ffmpeg",
     preset: str = "medium",
     crf: int = 20,
+    timeout_seconds: float = DEFAULT_MEDIA_COMMAND_TIMEOUT_SECONDS,
     runner: CommandRunner = _default_runner,
 ) -> Path:
     """Burn subtitles while retaining the complete source duration and frame."""
@@ -213,7 +242,8 @@ def burn_subtitles(
     destination = Path(output_path)
     _ensure_parent(destination)
     ass_filter = f"ass=filename='{_escape_ffmpeg_filter_path(subtitles)}'"
-    runner(
+    _run_command(
+        runner,
         [
             ffmpeg,
             "-hide_banner",
@@ -245,7 +275,8 @@ def burn_subtitles(
             "-movflags",
             "+faststart",
             str(destination),
-        ]
+        ],
+        timeout_seconds=timeout_seconds,
     )
     return destination
 
@@ -295,6 +326,7 @@ def create_cover(
     ffmpeg: str = "ffmpeg",
     frame_second: float = 0.5,
     font_path: str | Path | None = None,
+    timeout_seconds: float = DEFAULT_MEDIA_COMMAND_TIMEOUT_SECONDS,
     runner: CommandRunner = _default_runner,
 ) -> Path:
     """Create an Instagram-ready 9:16 cover without altering the video itself."""
@@ -306,7 +338,8 @@ def create_cover(
     _ensure_parent(destination)
     with tempfile.TemporaryDirectory(prefix="reel-cover-") as temporary_directory:
         frame_path = Path(temporary_directory) / "frame.jpg"
-        runner(
+        _run_command(
+            runner,
             [
                 ffmpeg,
                 "-hide_banner",
@@ -324,7 +357,8 @@ def create_cover(
                 "-q:v",
                 "2",
                 str(frame_path),
-            ]
+            ],
+            timeout_seconds=timeout_seconds,
         )
 
         image = Image.open(frame_path).convert("RGB").resize((1080, 1920))

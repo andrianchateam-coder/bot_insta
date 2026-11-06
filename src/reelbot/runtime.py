@@ -85,7 +85,11 @@ async def create_runtime(settings: Settings) -> RuntimeComponents:
     if recovered:
         LOGGER.info("Recovered %d interrupted job(s)", recovered)
 
-    app = create_web_app(database, settings.media_root)
+    app = create_web_app(
+        database,
+        settings.media_root,
+        public_media_ttl_hours=settings.public_media_ttl_hours,
+    )
     issues = pipeline_configuration_issues(settings)
     if issues:
         LOGGER.warning(
@@ -102,18 +106,6 @@ async def create_runtime(settings: Settings) -> RuntimeComponents:
     telegram_token = _secret_value(settings.telegram_bot_token)
     assert telegram_token is not None
     bot = Bot(token=telegram_token)
-    service = ReelService(
-        database,
-        bot,
-        settings.media_root,
-        admin_ids=settings.admin_ids,
-        max_upload_bytes=settings.max_upload_mb * 1024 * 1024,
-    )
-    dispatcher = create_dispatcher(
-        service,
-        admin_ids=settings.admin_ids,
-        max_upload_bytes=settings.max_upload_mb * 1024 * 1024,
-    )
 
     publisher: InstagramPublisher | None = None
     instagram_issues = instagram_configuration_issues(settings)
@@ -132,6 +124,22 @@ async def create_runtime(settings: Settings) -> RuntimeComponents:
             poll_interval_seconds=settings.instagram_poll_seconds,
             processing_timeout_seconds=settings.instagram_timeout_seconds,
         )
+
+    service = ReelService(
+        database,
+        bot,
+        settings.media_root,
+        admin_ids=settings.admin_ids,
+        max_upload_bytes=settings.max_upload_mb * 1024 * 1024,
+        publishing_enabled=publisher is not None,
+    )
+    dispatcher = create_dispatcher(
+        service,
+        admin_ids=settings.admin_ids,
+        max_upload_bytes=settings.max_upload_mb * 1024 * 1024,
+        max_preview_bytes=settings.max_preview_mb * 1024 * 1024,
+        public_base_url=settings.public_base_url,
+    )
 
     worker = ReelWorker(
         settings=settings,
@@ -172,6 +180,10 @@ async def serve(settings: Settings | None = None) -> None:
         level=getattr(logging, settings.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # Third-party debug logs may include request metadata. Application errors
+    # are surfaced explicitly without allowing credentials into those logs.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     components = await create_runtime(settings)
     config = uvicorn.Config(
         components.app,

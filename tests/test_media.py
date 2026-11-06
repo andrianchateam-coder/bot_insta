@@ -1,6 +1,16 @@
+import subprocess
 from pathlib import Path
 
-from reelbot.media import SubtitleSegment, burn_subtitles, extract_audio, write_ass, write_srt
+import pytest
+
+from reelbot.media import (
+    MediaProcessingError,
+    SubtitleSegment,
+    burn_subtitles,
+    extract_audio,
+    write_ass,
+    write_srt,
+)
 
 
 def test_write_srt_uses_timestamp_and_utf8_kazakh(tmp_path: Path) -> None:
@@ -57,4 +67,19 @@ def test_burn_subtitles_does_not_crop_or_trim_video(tmp_path: Path) -> None:
     assert filter_value.startswith("ass=filename=")
     assert "crop" not in filter_value
     assert command[-1] == str(output)
+
+
+def test_default_media_runner_enforces_timeout(monkeypatch, tmp_path: Path) -> None:
+    def timed_out(command, **kwargs):
+        assert kwargs["timeout"] == 12
+        raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(subprocess, "run", timed_out)
+
+    with pytest.raises(MediaProcessingError, match="timed out after 12 seconds"):
+        extract_audio(
+            "source.mp4",
+            tmp_path / "audio.mp3",
+            timeout_seconds=12,
+        )
 

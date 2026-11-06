@@ -66,6 +66,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("MAX_TELEGRAM_UPLOAD_MB", "MAX_UPLOAD_MB"),
     )
     max_preview_mb: int = Field(default=48, ge=1, le=2_000)
+    max_drive_download_mb: int = Field(default=500, ge=1, le=10_000)
+    drive_download_timeout_seconds: float = Field(default=900, ge=10, le=7_200)
+    media_command_timeout_seconds: float = Field(default=900, ge=10, le=7_200)
+    public_media_ttl_hours: float = Field(default=72, ge=1, le=8_760)
+    media_retention_days: int = Field(default=30, ge=1, le=3_650)
     video_crf: int = Field(default=21, ge=0, le=51)
     video_preset: str = "medium"
     worker_poll_seconds: float = Field(default=1.0, ge=0.1, le=60)

@@ -252,12 +252,9 @@ class InstagramPublisher:
     ) -> dict[str, Any]:
         request_params = dict(params or {})
         request_data = dict(data or {})
-        # Keeping the token in the body for POSTs avoids leaking it in ordinary
-        # URL diagnostics. Graph GET endpoints require it as a query parameter.
-        if method.upper() == "GET":
-            request_params["access_token"] = self._token
-        else:
-            request_data["access_token"] = self._token
+        # Graph accepts bearer authentication. Keeping the token out of query
+        # strings prevents ordinary HTTP access/request logs from persisting it.
+        headers = {"Authorization": f"Bearer {self._token}"}
 
         try:
             response = await self._client.request(
@@ -265,6 +262,7 @@ class InstagramPublisher:
                 f"{self.base_url}{path}",
                 params=request_params,
                 data=request_data,
+                headers=headers,
             )
         except httpx.HTTPError as exc:
             raise InstagramAPIError(

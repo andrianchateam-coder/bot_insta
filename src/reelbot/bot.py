@@ -76,6 +76,8 @@ class TelegramJobService(Protocol):
 
     async def reject_job(self, *, job_id: str, actor_id: int) -> Any: ...
 
+    async def retry_job(self, *, job_id: str, actor_id: int) -> Any: ...
+
 
 def is_allowed_user(user_id: int | None, admin_ids: frozenset[int] | set[int]) -> bool:
     """Return whether a Telegram user may submit work.
@@ -208,7 +210,23 @@ def format_job_status(job: Any) -> str:
     suffix = ""
     if status == "published" and job_value(job, "instagram_permalink"):
         suffix = f" — {job_value(job, 'instagram_permalink')}"
+    elif status == "ready":
+        suffix = f" — повторить предпросмотр: /preview {job_id}"
+    elif status == "failed":
+        suffix = f" — повторить задачу: /retry {job_id}"
     return f"• {job_id}: {label}{suffix}"
+
+
+def _command_job_id(text: str | None) -> str | None:
+    """Extract a safe job ID from a one-argument Telegram command."""
+
+    if not text:
+        return None
+    parts = text.strip().split(maxsplit=1)
+    if len(parts) != 2:
+        return None
+    job_id = parts[1].strip()
+    return job_id if re.fullmatch(r"[A-Za-z0-9_-]{1,40}", job_id) else None
 
 
 def build_public_media_url(
@@ -351,6 +369,8 @@ def build_router(
     *,
     admin_ids: frozenset[int] | set[int],
     max_upload_bytes: int,
+    max_preview_bytes: int = 49 * 1024 * 1024,
+    public_base_url: str | None = None,
 ) -> Router:
     """Create an isolated Aiogram router; no global bot or token is retained."""
 
@@ -381,7 +401,9 @@ def build_router(
             "1. Пришлите видео или ссылку Google Drive.\n"
             "2. Дождитесь предпросмотра.\n"
             "3. Нажмите «Одобрить и опубликовать» либо «Отклонить».\n\n"
-            "Команда /status показывает последние задания."
+            "Команда /status показывает последние задания.\n"
+            "/preview ID повторно отправляет готовый предпросмотр.\n"
+            "/retry ID повторяет задачу после временной ошибки."
         )
 
     @router.message(Command("status"))
@@ -398,6 +420,73 @@ def build_router(
             await message.answer("Заданий пока нет.")
             return
         await message.answer("Последние задания:\n" + "\n".join(map(format_job_status, jobs)))
+
+    @router.message(Command("preview"))
+    async def preview_command(message: Message) -> None:
+        if not await guard_message(message):
+            return
+        job_id = _command_job_id(message.text)
+        if not job_id:
+            await message.answer("Укажите номер: /preview ID")
+            return
+        try:
+            job = await service.get_job(job_id)
+            if not job:
+                raise KeyError(job_id)
+            owner_id = job_value(job, "user_id", job_value(job, "owner_id"))
+            if not may_manage_job(
+                message.from_user.id if message.from_user else None,
+                owner_id,
+                allowed,
+            ):
+                raise PermissionError("The actor cannot manage this job")
+            if _status_value(job_value(job, "status")) != "ready":
+                await message.answer("Предпросмотр доступен только для готового задания.")
+                return
+            await send_preview(
+                message.bot,
+                job,
+                max_telegram_bytes=max_preview_bytes,
+                public_base_url=public_base_url,
+            )
+        except KeyError:
+            await message.answer("Задание не найдено.")
+        except PermissionError:
+            await message.answer("Это не ваше задание.")
+        except Exception:
+            LOGGER.exception("Could not resend preview for job %s", job_id)
+            await message.answer("Не удалось отправить предпросмотр. Попробуйте позже.")
+
+    @router.message(Command("retry"))
+    async def retry_command(message: Message) -> None:
+        if not await guard_message(message):
+            return
+        job_id = _command_job_id(message.text)
+        if not job_id:
+            await message.answer("Укажите номер: /retry ID")
+            return
+        actor_id = message.from_user.id if message.from_user else 0
+        try:
+            retried = await service.retry_job(job_id=job_id, actor_id=actor_id)
+        except KeyError:
+            await message.answer("Задание не найдено.")
+            return
+        except PermissionError:
+            await message.answer("Это не ваше задание.")
+            return
+        except Exception as error:
+            if type(error).__name__ == "PublishingNotConfigured":
+                await message.answer(
+                    "Instagram ещё не подключён. Готовый ролик сохранён; "
+                    "повторите команду после подключения."
+                )
+            else:
+                LOGGER.exception("Could not retry job %s", job_id)
+                await message.answer("Задание сейчас нельзя повторить.")
+            return
+        status = _status_value(job_value(retried, "status"))
+        action = "публикацию" if status == "approved" else "обработку"
+        await message.answer(f"Повторяю {action} задания {job_id}.")
 
     @router.message(F.video | F.document)
     async def media_message(message: Message) -> None:
@@ -478,6 +567,14 @@ def build_router(
         if not may_manage_job(actor_id, owner_id, allowed):
             await callback.answer("Это не ваше задание.", show_alert=True)
             return
+        if action == "approve" and not getattr(
+            service, "publishing_enabled", True
+        ):
+            await callback.answer(
+                "Instagram ещё не подключён. Ролик сохранён; публикация не начата.",
+                show_alert=True,
+            )
+            return
         try:
             if action == "approve":
                 await service.approve_job(job_id=job_id, actor_id=actor_id)
@@ -502,6 +599,8 @@ def create_dispatcher(
     *,
     admin_ids: frozenset[int] | set[int],
     max_upload_bytes: int,
+    max_preview_bytes: int = 49 * 1024 * 1024,
+    public_base_url: str | None = None,
 ) -> Dispatcher:
     """Create a dispatcher for callers that do not need additional routers."""
 
@@ -511,6 +610,8 @@ def create_dispatcher(
             service,
             admin_ids=admin_ids,
             max_upload_bytes=max_upload_bytes,
+            max_preview_bytes=max_preview_bytes,
+            public_base_url=public_base_url,
         )
     )
     return dispatcher

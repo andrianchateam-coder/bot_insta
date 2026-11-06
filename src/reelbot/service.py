@@ -23,6 +23,10 @@ class JobStateError(RuntimeError):
     """A review action was invalid for the current durable state."""
 
 
+class PublishingNotConfigured(JobStateError):
+    """Instagram publishing has not been connected for this runtime."""
+
+
 class ReelService:
     """Download submissions and expose safe queue transitions to Aiogram."""
 
@@ -34,12 +38,14 @@ class ReelService:
         *,
         admin_ids: frozenset[int] | set[int] = frozenset(),
         max_upload_bytes: int | None = None,
+        publishing_enabled: bool = True,
     ) -> None:
         self.database = database
         self.bot = bot
         self.media_root = Path(media_root).resolve()
         self.admin_ids = frozenset(admin_ids)
         self.max_upload_bytes = max_upload_bytes
+        self.publishing_enabled = publishing_enabled
 
     def _job_directory(self, job_id: str) -> Path:
         directory = (self.media_root / job_id).resolve()
@@ -137,6 +143,10 @@ class ReelService:
             raise KeyError(job_id)
         if actor_id != job.user_id and actor_id not in self.admin_ids:
             raise PermissionError("The actor cannot manage this job")
+        if new_status is JobStatus.APPROVED and not self.publishing_enabled:
+            raise PublishingNotConfigured(
+                "Instagram publishing is not configured"
+            )
         changed = await self.database.transition_job(
             job_id,
             [JobStatus.READY],
@@ -161,5 +171,44 @@ class ReelService:
             new_status=JobStatus.REJECTED,
         )
 
+    async def retry_job(self, *, job_id: str, actor_id: int) -> Job:
+        """Retry a failed processing or publishing stage without re-uploading.
 
-__all__ = ["JobStateError", "ReelService"]
+        A job with complete processed artifacts resumes publication; otherwise
+        it returns to the processing queue. The compare-and-set transition
+        keeps repeated commands from scheduling the same job twice.
+        """
+
+        job = await self.database.get_job(job_id)
+        if job is None:
+            raise KeyError(job_id)
+        if actor_id != job.user_id and actor_id not in self.admin_ids:
+            raise PermissionError("The actor cannot manage this job")
+
+        processed_paths = (job.output_path, job.cover_path)
+        processed_ready = bool(job.caption)
+        for stored_path in processed_paths:
+            if not stored_path:
+                processed_ready = False
+                break
+            path = Path(stored_path).resolve()
+            if self.media_root not in path.parents or not path.is_file():
+                processed_ready = False
+                break
+        target = JobStatus.APPROVED if processed_ready else JobStatus.QUEUED
+        if target is JobStatus.APPROVED and not self.publishing_enabled:
+            raise PublishingNotConfigured(
+                "Instagram publishing is not configured"
+            )
+        changed = await self.database.transition_job(
+            job.id,
+            [JobStatus.FAILED],
+            target,
+            error=None,
+        )
+        if changed is None:
+            raise JobStateError(f"Job {job_id} is not retryable")
+        return changed
+
+
+__all__ = ["JobStateError", "PublishingNotConfigured", "ReelService"]

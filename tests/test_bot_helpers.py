@@ -102,3 +102,12 @@ def test_format_job_status_accepts_mapping_and_enum() -> None:
     )
     assert "опубликован" in text
     assert "https://instagram.com/reel/example" in text
+
+
+@pytest.mark.parametrize(
+    ("status", "command"),
+    [("ready", "/preview job-1"), ("failed", "/retry job-1")],
+)
+def test_format_job_status_suggests_recovery_command(status: str, command: str) -> None:
+    text = format_job_status({"id": "job-1", "status": status})
+    assert command in text

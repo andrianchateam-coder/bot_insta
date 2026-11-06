@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -28,10 +29,29 @@ def _safe_media_path(value: str | Path | None, media_root: Path) -> Path:
     return candidate
 
 
-def create_web_app(database: JobReader, media_root: str | Path) -> FastAPI:
+def _media_link_expired(job: Any, ttl: timedelta) -> bool:
+    updated_at = getattr(job, "updated_at", None)
+    if not isinstance(updated_at, datetime):
+        return True
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=UTC)
+    else:
+        updated_at = updated_at.astimezone(UTC)
+    return datetime.now(UTC) - updated_at > ttl
+
+
+def create_web_app(
+    database: JobReader,
+    media_root: str | Path,
+    *,
+    public_media_ttl_hours: float = 72,
+) -> FastAPI:
     """Create routes without starting Telegram polling or background workers."""
 
+    if public_media_ttl_hours <= 0:
+        raise ValueError("public_media_ttl_hours must be greater than zero")
     root = Path(media_root)
+    public_media_ttl = timedelta(hours=public_media_ttl_hours)
     app = FastAPI(title="Reel Bot", version="0.1.0")
 
     @app.get("/healthz")
@@ -43,6 +63,8 @@ def create_web_app(database: JobReader, media_root: str | Path) -> FastAPI:
         job = await database.get_job(job_id)
         stored_token = getattr(job, "public_token", "") if job else ""
         if not stored_token or not hmac.compare_digest(token, stored_token):
+            raise HTTPException(status_code=404, detail="Media is not available")
+        if _media_link_expired(job, public_media_ttl):
             raise HTTPException(status_code=404, detail="Media is not available")
 
         if kind == "video":

@@ -1,3 +1,6 @@
+import asyncio
+import resource
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -5,7 +8,7 @@ import pytest
 from reelbot.config import Settings
 from reelbot.db import Database
 from reelbot.models import JobStatus, SourceType
-from reelbot.worker import ProcessedArtifacts, ReelWorker
+from reelbot.worker import ProcessedArtifacts, ReelWorker, _download_drive_file
 
 
 class FakeBot:
@@ -14,6 +17,59 @@ class FakeBot:
 
     async def send_message(self, chat_id: int, text: str) -> None:
         self.messages.append((chat_id, text))
+
+
+@pytest.mark.asyncio
+async def test_drive_downloader_enforces_os_quota_and_kills_timeout(
+    monkeypatch, tmp_path: Path
+) -> None:
+    destination = tmp_path / "source.mp4"
+    partial = tmp_path / "source.mp4.random.part"
+    partial.write_bytes(b"partial")
+    limit_calls = []
+
+    class FakeProcess:
+        pid = 12345
+        returncode = None
+
+        def __init__(self) -> None:
+            self.finished = asyncio.Event()
+            self.killed = False
+
+        async def communicate(self):
+            await self.finished.wait()
+            return b"", b""
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -9
+            self.finished.set()
+
+    process = FakeProcess()
+
+    async def fake_subprocess(*args, **kwargs):
+        assert "--no-check-certificate" not in args
+        assert kwargs["stdout"] == asyncio.subprocess.PIPE
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess)
+    monkeypatch.setattr(
+        resource,
+        "prlimit",
+        lambda pid, kind, limits: limit_calls.append((pid, kind, limits)),
+    )
+
+    with pytest.raises(TimeoutError, match="timed out"):
+        await _download_drive_file(
+            "1Abc_def-GHIjklMNop",
+            destination,
+            max_bytes=1024,
+            timeout_seconds=0.01,
+        )
+
+    assert limit_calls == [(12345, resource.RLIMIT_FSIZE, (1024, 1024))]
+    assert process.killed
+    assert not partial.exists()
 
 
 class FakePublisher:
@@ -227,3 +283,47 @@ async def test_processing_failure_is_durable_and_redacts_secret(tmp_path: Path) 
     assert failed.error is not None
     assert secret not in failed.error
     assert "[REDACTED]" in failed.error
+
+
+@pytest.mark.asyncio
+async def test_cleanup_removes_old_terminal_media_but_keeps_history(worker_parts) -> None:
+    settings, database, _bot, _publisher, _previews, worker = worker_parts
+    directory = settings.media_root / "old-published-job"
+    directory.mkdir()
+    source = directory / "source.mp4"
+    output = directory / "ready.mp4"
+    source.write_bytes(b"source")
+    output.write_bytes(b"ready")
+    job = await database.create_job(
+        job_id="old-published-job",
+        chat_id=10,
+        user_id=20,
+        source_type=SourceType.TELEGRAM,
+        original_name="source.mp4",
+        source_path=source,
+    )
+    await database.update_job(
+        job.id,
+        status=JobStatus.PUBLISHED,
+        output_path=output,
+        instagram_media_id="media-1",
+    )
+    old_timestamp = datetime.now(UTC) - timedelta(days=31)
+    connection = await database._connect()
+    try:
+        await connection.execute(
+            "UPDATE jobs SET updated_at = ? WHERE id = ?",
+            (old_timestamp.isoformat(), job.id),
+        )
+        await connection.commit()
+    finally:
+        await connection.close()
+
+    assert await worker.cleanup_expired_media(now=datetime.now(UTC)) == 1
+
+    cleaned = await database.get_job(job.id)
+    assert cleaned is not None
+    assert cleaned.status is JobStatus.PUBLISHED
+    assert cleaned.source_path is None
+    assert cleaned.output_path is None
+    assert not directory.exists()

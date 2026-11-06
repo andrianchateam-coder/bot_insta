@@ -13,6 +13,11 @@ def test_settings_parse_admin_ids_and_normalize_url(monkeypatch, tmp_path: Path)
     monkeypatch.setenv("REELBOT_OPENAI_API_KEY", "openai-secret")
     monkeypatch.setenv("OPENAI_TEXT_MODEL", "test-model")
     monkeypatch.setenv("MAX_TELEGRAM_UPLOAD_MB", "42")
+    monkeypatch.setenv("MAX_DRIVE_DOWNLOAD_MB", "750")
+    monkeypatch.setenv("DRIVE_DOWNLOAD_TIMEOUT_SECONDS", "600")
+    monkeypatch.setenv("MEDIA_COMMAND_TIMEOUT_SECONDS", "700")
+    monkeypatch.setenv("PUBLIC_MEDIA_TTL_HOURS", "48")
+    monkeypatch.setenv("MEDIA_RETENTION_DAYS", "45")
     monkeypatch.setenv("FFMPEG_BINARY", "/opt/ffmpeg")
 
     settings = Settings(
@@ -30,6 +35,11 @@ def test_settings_parse_admin_ids_and_normalize_url(monkeypatch, tmp_path: Path)
     assert settings.openai_api_key.get_secret_value() == "openai-secret"
     assert settings.openai_chat_model == "test-model"
     assert settings.max_upload_mb == 42
+    assert settings.max_drive_download_mb == 750
+    assert settings.drive_download_timeout_seconds == 600
+    assert settings.media_command_timeout_seconds == 700
+    assert settings.public_media_ttl_hours == 48
+    assert settings.media_retention_days == 45
     assert settings.ffmpeg_path == "/opt/ffmpeg"
 
 

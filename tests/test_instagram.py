@@ -65,7 +65,7 @@ async def test_publish_reel_happy_path() -> None:
     assert seen_create["share_to_feed"] == ["true"]
     assert seen_create["video_url"] == ["https://media.example/video.mp4"]
     assert seen_create["cover_url"] == ["https://media.example/cover.jpg"]
-    assert seen_create["access_token"] == ["top-secret"]
+    assert "access_token" not in seen_create
 
 
 @pytest.mark.asyncio
@@ -213,6 +213,32 @@ async def test_api_errors_do_not_expose_access_token() -> None:
 
     assert token not in str(exc_info.value)
     assert exc_info.value.error_code == 190
+
+
+@pytest.mark.asyncio
+async def test_access_token_is_only_sent_as_authorization_header(caplog) -> None:
+    token = "must-never-appear-in-a-url-or-log"
+    seen_requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_requests.append(request)
+        return httpx.Response(200, json={"permalink": "https://example.test/reel"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        publisher = InstagramPublisher(
+            access_token=token,
+            instagram_user_id="123",
+            client=client,
+        )
+        with caplog.at_level("INFO", logger="httpx"):
+            await publisher.fetch_permalink("media-1")
+
+    assert seen_requests
+    request = seen_requests[0]
+    assert request.headers["Authorization"] == f"Bearer {token}"
+    assert "access_token" not in request.url.params
+    assert token not in str(request.url)
+    assert token not in caplog.text
 
 
 @pytest.mark.asyncio
